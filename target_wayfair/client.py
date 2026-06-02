@@ -77,7 +77,7 @@ class WayfairSink(HotglueSink):
         try:
             body = response.json()
         except Exception:
-            return
+            raise FatalAPIError(f"Wayfair invalid JSON response: {response.text}")
         gql_errors = body.get("errors")
         if gql_errors:
             msg = "; ".join(e.get("message", "") for e in gql_errors)
@@ -110,12 +110,8 @@ class WayfairSink(HotglueSink):
         """
         for attempt in range(1, POLL_MAX_ATTEMPTS + 1):
             body = self._graphql(query)
-            statuses = (
-                body.get("data", {})
-                .get("productAddition", {})
-                .get("submissionsV2", {})
-                .get("productAdditionStatus", [])
-            )
+            product_addition = (body.get("data") or {}).get("productAddition") or {}
+            statuses = (product_addition.get("submissionsV2") or {}).get("productAdditionStatus") or []
             if not statuses:
                 LOGGER.warning(
                     "submissionsV2 returned empty productAdditionStatus for %s "
@@ -203,7 +199,7 @@ class WayfairSink(HotglueSink):
         country = market_context.get("country", "UNITED_STATES")
         brand = market_context.get("brand", "WAYFAIR")
         request_id = (
-            f'"{job_context["productAdditionRequestId"]}"'
+            json.dumps(job_context["productAdditionRequestId"])
             if job_context.get("productAdditionRequestId")
             else "null"
         )
@@ -261,10 +257,8 @@ mutation {{
         )
         body = self._graphql(mutation)
         submit_result = (
-            body.get("data", {})
-            .get("productAddition", {})
-            .get("submitV2", {})
-        )
+            (body.get("data") or {}).get("productAddition") or {}
+        ).get("submitV2") or {}
         request_id = submit_result.get("productAdditionRequestId")
         if not request_id:
             raise FatalAPIError(
