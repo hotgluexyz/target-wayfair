@@ -153,11 +153,11 @@ class WayfairSink(HotglueSink):
                 LOGGER.warning(
                     "Wayfair validation warnings for %s: %s",
                     request_id,
-                    "; ".join(w["flaw"] for w in warnings),
+                    "; ".join(f"{w['attributeId']}: {w['flaw']}" for w in warnings),
                 )
 
             if validation_status == "FAILED":
-                error_msg = "; ".join(e["flaw"] for e in errors) if errors else (
+                error_msg = "; ".join(f"{e['attributeId']}: {e['flaw']}" for e in errors) if errors else (
                     "Submission failed with no specific ERROR flaws listed"
                 )
                 raise InvalidPayloadError(
