@@ -1,6 +1,9 @@
+import singer
 from hotglue_etl_exceptions import InvalidPayloadError
 
 from target_wayfair.client import WayfairSink
+
+LOGGER = singer.get_logger()
 
 
 class ProductsSink(WayfairSink):
@@ -33,7 +36,7 @@ class ProductsSink(WayfairSink):
     name = "Products"
 
     def preprocess_record(self, record: dict, context: dict) -> dict:
-        """Validate required fields before submitting to Wayfair."""
+        """Validate required fields and drop attributes Wayfair does not support."""
         missing = [f for f in ("productId", "classId", "attributes") if not record.get(f)]
         if missing:
             raise InvalidPayloadError(
@@ -46,11 +49,59 @@ class ProductsSink(WayfairSink):
                 "Wayfair Products record 'attributes' must be a list"
             )
 
-        for i, attr in enumerate(attributes):
+        supported = self.get_supported_attributes(
+            record["classId"], self.resolve_market_context(record)
+        )
+        kept = []
+        dropped = []
+        for attr in attributes:
+            attr_id = attr.get("attributeId")
+            if attr_id is not None and str(attr_id) in supported:
+                kept.append(attr)
+            else:
+                dropped.append(attr_id)
+
+        if dropped:
+            LOGGER.info(
+                "Dropped %d unsupported attribute(s) for product %s classId %s: %s",
+                len(dropped),
+                record.get("productId"),
+                record.get("classId"),
+                dropped,
+            )
+
+        if not kept:
+            raise InvalidPayloadError(
+                f"Wayfair Products record for {record.get('productId')} has no "
+                f"attributes supported by classId {record.get('classId')}"
+            )
+
+        record["attributes"] = kept
+        for i, attr in enumerate(record["attributes"]):
             for field in ("attributeId", "value", "parentRank", "rank"):
                 if attr.get(field) is None:
                     raise InvalidPayloadError(
                         f"attributes[{i}] is missing required field '{field}'"
                     )
+
+        issues = []
+        for attr in record["attributes"]:
+            spec = supported[str(attr["attributeId"])]
+            attr["value"] = self.normalize_attribute_value(attr["value"], spec)
+            issue = self.describe_attribute_value_issue(
+                attr["attributeId"], attr.get("value"), spec
+            )
+            if issue:
+                issues.append(issue)
+
+        if issues:
+            product_id = record.get("productId")
+            if len(issues) == 1:
+                raise InvalidPayloadError(
+                    f"Product {product_id} has invalid attribute: {issues[0]}"
+                )
+            raise InvalidPayloadError(
+                f"Product {product_id} has invalid attributes: {'; '.join(issues)}"
+            )
 
         return record

@@ -1,6 +1,6 @@
 import json
 import time
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 import requests
 import singer
@@ -32,6 +32,8 @@ class WayfairSink(HotglueSink):
     ) -> None:
         super().__init__(target, stream_name, schema, key_properties)
         self._auth = WayfairAuth(self._target)
+        # classId + market → {taxonomyAttributeId: attribute spec}
+        self._taxonomy_attr_cache: Dict[Tuple[str, str, str, str], Dict[str, dict]] = {}
 
     @property
     def base_url(self) -> str:
@@ -52,6 +54,382 @@ class WayfairSink(HotglueSink):
         )
         self.validate_response(response)
         return response.json()
+
+    def resolve_market_context(self, record: dict) -> dict:
+        """Return the record's marketContext, falling back to config / defaults."""
+        return record.get("marketContext") or {
+            "locale": self.config.get("locale", "en-US"),
+            "country": self.config.get("country", "UNITED_STATES"),
+            "brand": self.config.get("brand", "WAYFAIR"),
+        }
+
+    _ATTRIBUTE_FIELDS = """
+      taxonomyAttributeId
+      title
+      description
+      requirement
+      valueFormat {
+        canValueBeCustomized
+        canValueBeSetToUnavailable
+        canValueBeSetToNotApplicable
+        datatype
+      }
+      possibleAttributeValues {
+        value
+        definition
+      }
+      parentAttributeId
+    """
+
+    @staticmethod
+    def _attributes_from_filter_result(result) -> list:
+        """Normalize attributesByFilter, which may be an object or a list of objects."""
+        if isinstance(result, list):
+            attributes = []
+            for item in result:
+                if not isinstance(item, dict):
+                    continue
+                if "attributes" in item:
+                    attributes.extend(item.get("attributes") or [])
+                else:
+                    attributes.append(item)
+            return attributes
+        if isinstance(result, dict):
+            return result.get("attributes") or []
+        return []
+
+    @staticmethod
+    def _index_taxonomy_attributes(attributes: list) -> Dict[str, dict]:
+        indexed: Dict[str, dict] = {}
+        for attr in attributes or []:
+            if not isinstance(attr, dict):
+                continue
+            attr_id = attr.get("taxonomyAttributeId")
+            if attr_id is not None:
+                indexed[str(attr_id)] = attr
+            indexed.update(
+                WayfairSink._index_taxonomy_attributes(attr.get("childAttributes") or [])
+            )
+        return indexed
+
+    def _taxonomy_cache_key(self, class_id, market_context: dict) -> Tuple[str, str, str, str]:
+        return (
+            str(class_id),
+            str(market_context.get("brand", "WAYFAIR")),
+            str(market_context.get("country", "UNITED_STATES")),
+            str(market_context.get("locale", "en-US")),
+        )
+
+    def get_supported_attributes(self, class_id, market_context: dict) -> Dict[str, dict]:
+        """Return the full Wayfair attribute spec map for this class + market.
+
+        Results are cached for the lifetime of the sink so products that share
+        a classId do not re-query attributesByFilter.
+        """
+        cache_key = self._taxonomy_cache_key(class_id, market_context)
+        if cache_key in self._taxonomy_attr_cache:
+            return self._taxonomy_attr_cache[cache_key]
+
+        locale = market_context.get("locale", "en-US")
+        country = market_context.get("country", "UNITED_STATES")
+        brand = market_context.get("brand", "WAYFAIR")
+        try:
+            class_id_gql = int(class_id)
+        except (TypeError, ValueError):
+            raise InvalidPayloadError(
+                f"Wayfair classId must be an integer, got {class_id!r}"
+            )
+
+        query = f"""
+query GetTaxonomyAttributesByFilter {{
+  attributesByFilter(
+    input: {{
+      classId: {class_id_gql}
+      marketContext: {{
+        brand: {brand}
+        country: {country}
+        locale: {json.dumps(locale)}
+      }}
+    }}
+  ) {{
+    classId
+    attributes {{
+      {self._ATTRIBUTE_FIELDS}
+      childAttributes {{
+        {self._ATTRIBUTE_FIELDS}
+      }}
+    }}
+  }}
+}}
+"""
+        body = self._graphql(query)
+        result = (body.get("data") or {}).get("attributesByFilter")
+        supported = self._index_taxonomy_attributes(
+            self._attributes_from_filter_result(result)
+        )
+        if not supported:
+            raise FatalAPIError(
+                f"Wayfair attributesByFilter returned no attributes for classId {class_id}"
+            )
+
+        LOGGER.info(
+            "Cached %d supported Wayfair attributes for classId %s",
+            len(supported),
+            class_id,
+        )
+        self._taxonomy_attr_cache[cache_key] = supported
+        return supported
+
+    def lookup_cached_attribute(self, attribute_id: str) -> Optional[dict]:
+        """Find a previously fetched attribute spec by taxonomyAttributeId."""
+        attr_id = str(attribute_id)
+        for specs in self._taxonomy_attr_cache.values():
+            spec = specs.get(attr_id)
+            if spec:
+                return spec
+        return None
+
+    @staticmethod
+    def _possible_values(spec: dict) -> List[str]:
+        values = []
+        for entry in spec.get("possibleAttributeValues") or []:
+            if isinstance(entry, dict) and entry.get("value") is not None:
+                values.append(str(entry["value"]))
+            elif isinstance(entry, str):
+                values.append(entry)
+        return values
+
+    @staticmethod
+    def _format_valid_values(spec: dict) -> str:
+        parts = []
+        for entry in spec.get("possibleAttributeValues") or []:
+            if isinstance(entry, str):
+                parts.append(entry)
+                continue
+            if not isinstance(entry, dict):
+                continue
+            value = entry.get("value")
+            if value is None:
+                continue
+            definition = entry.get("definition")
+            if definition and str(definition) != str(value):
+                parts.append(f"{value} ({definition})")
+            else:
+                parts.append(str(value))
+        return ", ".join(parts)
+
+    @staticmethod
+    def _label_attribute(attribute_id: str, spec: Optional[dict]) -> str:
+        title = (spec or {}).get("title")
+        return f"{attribute_id} ({title})" if title else str(attribute_id)
+
+    def _compose_attribute_issue(self, attribute_id: str, spec: dict, reason: str) -> str:
+        parts = [f"{self._label_attribute(attribute_id, spec)}: {reason}"]
+        description = spec.get("description")
+        if description:
+            parts.append(description)
+        valid_values = self._format_valid_values(spec)
+        datatype = (spec.get("valueFormat") or {}).get("datatype")
+        if valid_values:
+            parts.append(f"Valid values: {valid_values}")
+        elif datatype:
+            parts.append(f"Expected datatype: {datatype}")
+        return " ".join(parts)
+
+    @staticmethod
+    def _matches_unset_value(value: str, value_format: dict) -> bool:
+        lower = value.lower()
+        if value_format.get("canValueBeSetToNotApplicable") and lower in {
+            "does not apply",
+            "n/a",
+        }:
+            return True
+        return bool(
+            value_format.get("canValueBeSetToUnavailable") and lower == "unavailable"
+        )
+
+    _TRUE_VALUES = {"true", "1", "yes"}
+    _FALSE_VALUES = {"false", "0", "no"}
+    _YES_NO_EXTRAS = {"does not apply", "unavailable", "n/a", "not applicable"}
+    _NOT_APPLICABLE_ALIASES = {"not applicable", "n/a"}
+    _REGION_ALIASES = {
+        "united states": "US",
+        "united states of america": "US",
+        "usa": "US",
+        "u.s.": "US",
+        "u.s.a.": "US",
+        "america": "US",
+        "united kingdom": "UK",
+        "great britain": "UK",
+        "britain": "UK",
+        "england": "UK",
+        "european union": "EU",
+        "europe": "EU",
+        "canada": "CA",
+    }
+
+    def _yes_no_labels(self, spec: dict) -> Tuple[str, str]:
+        yes, no = "Yes", "No"
+        for value in self._possible_values(spec):
+            if value.lower() == "yes":
+                yes = value
+            elif value.lower() == "no":
+                no = value
+        return yes, no
+
+    def _is_yes_no_attribute(self, spec: dict) -> bool:
+        value_format = spec.get("valueFormat") or {}
+        if (value_format.get("datatype") or "").upper() == "BOOLEAN":
+            return True
+        possible = {value.lower() for value in self._possible_values(spec)}
+        extras = possible - {"yes", "no"} - self._YES_NO_EXTRAS
+        return {"yes", "no"}.issubset(possible) and not extras
+
+    def normalize_boolean_value(self, value, spec: dict):
+        """Convert boolean-like values to Wayfair Yes/No when the spec expects that."""
+        if not self._is_yes_no_attribute(spec):
+            return value
+        if isinstance(value, bool):
+            truthy = value
+        elif isinstance(value, (int, float)) and value in (0, 1):
+            truthy = bool(value)
+        else:
+            lowered = str(value).strip().lower()
+            if lowered in self._TRUE_VALUES:
+                truthy = True
+            elif lowered in self._FALSE_VALUES:
+                truthy = False
+            else:
+                return value
+        yes, no = self._yes_no_labels(spec)
+        return yes if truthy else no
+
+    def _does_not_apply_label(self, spec: dict) -> str:
+        for value in self._possible_values(spec):
+            if value.lower() == "does not apply":
+                return value
+        return "Does Not Apply"
+
+    def normalize_not_applicable_value(self, value, spec: dict):
+        """Map 'Not Applicable' / 'N/A' to Wayfair's 'Does Not Apply'."""
+        target = self._does_not_apply_label(spec)
+
+        def _map_part(part):
+            if str(part).strip().lower() in self._NOT_APPLICABLE_ALIASES:
+                return target
+            return part
+
+        if isinstance(value, str) and ";" in value:
+            return "; ".join(_map_part(part.strip()) for part in value.split(";"))
+        return _map_part(value)
+
+    def normalize_region_value(self, value, spec: dict):
+        """Map full region/country names to codes when the spec expects codes."""
+        possible = self._possible_values(spec)
+        if not possible:
+            return value
+        possible_by_lower = {item.lower(): item for item in possible}
+
+        def _map_part(part):
+            text = str(part).strip()
+            if text in possible:
+                return text
+            if text.lower() in possible_by_lower:
+                return possible_by_lower[text.lower()]
+            code = self._REGION_ALIASES.get(text.lower())
+            if code and code.lower() in possible_by_lower:
+                return possible_by_lower[code.lower()]
+            return part
+
+        if isinstance(value, str) and ";" in value:
+            return "; ".join(_map_part(part.strip()) for part in value.split(";"))
+        return _map_part(value)
+
+    def normalize_attribute_value(self, value, spec: dict):
+        value = self.normalize_not_applicable_value(value, spec)
+        value = self.normalize_region_value(value, spec)
+        return self.normalize_boolean_value(value, spec)
+
+    @staticmethod
+    def _datatype_issue(value: str, datatype: Optional[str]) -> Optional[str]:
+        if datatype == "BOOLEAN" and value.lower() not in {
+            "true",
+            "false",
+            "0",
+            "1",
+            "yes",
+            "no",
+        }:
+            return f"value {value!r} is not a boolean"
+        if datatype == "INTEGER":
+            try:
+                int(value.strip())
+            except (TypeError, ValueError):
+                return f"value {value!r} is not an integer"
+        if datatype == "DECIMAL":
+            try:
+                float(value.strip())
+            except (TypeError, ValueError):
+                return f"value {value!r} is not a decimal number"
+        return None
+
+    def describe_attribute_value_issue(
+        self, attribute_id: str, value, spec: dict
+    ) -> Optional[str]:
+        """Return a detailed error if `value` is not valid for this attribute spec."""
+        value_str = str(value)
+        value_format = spec.get("valueFormat") or {}
+        datatype = value_format.get("datatype")
+        customizable = bool(value_format.get("canValueBeCustomized"))
+        possible_values = self._possible_values(spec)
+
+        if self._matches_unset_value(value_str, value_format):
+            return None
+
+        if datatype == "MULTI_CHOICE":
+            parts = [part.strip() for part in value_str.split(";") if part.strip()]
+            if not parts:
+                return self._compose_attribute_issue(
+                    attribute_id, spec, f"value {value_str!r} is empty"
+                )
+            invalid = [part for part in parts if part not in possible_values]
+            if invalid and possible_values and not customizable:
+                return self._compose_attribute_issue(
+                    attribute_id,
+                    spec,
+                    f"value {value_str!r} contains invalid entries {invalid}",
+                )
+            if not invalid:
+                return None
+        elif value_str in possible_values:
+            return None
+        elif possible_values and not customizable:
+            return self._compose_attribute_issue(
+                attribute_id, spec, f"value {value_str!r} is not an allowed value"
+            )
+
+        datatype_issue = self._datatype_issue(value_str, datatype)
+        if datatype_issue:
+            return self._compose_attribute_issue(attribute_id, spec, datatype_issue)
+        return None
+
+    def format_validation_flaw(self, flaw: dict) -> str:
+        """Explain a Wayfair validationFlaw using cached taxonomy metadata."""
+        attr_id = str(flaw.get("attributeId") or "")
+        spec = self.lookup_cached_attribute(attr_id) if attr_id else None
+        label = self._label_attribute(attr_id, spec) if attr_id else "unknown attribute"
+        flaw_text = flaw.get("flaw") or "validation failed"
+        if not spec:
+            return f"{label}: {flaw_text}"
+        extras = []
+        description = spec.get("description")
+        if description:
+            extras.append(description)
+        valid_values = self._format_valid_values(spec)
+        if valid_values:
+            extras.append(f"Valid values: {valid_values}")
+        extra = f" {' '.join(extras)}" if extras else ""
+        return f"{label}: {flaw_text}.{extra}"
 
     def validate_response(self, response: requests.Response) -> None:
         """Raise the appropriate exception based on HTTP status."""
@@ -149,12 +527,14 @@ class WayfairSink(HotglueSink):
                 LOGGER.warning(
                     "Wayfair validation warnings for %s: %s",
                     request_id,
-                    "; ".join(f"{w['attributeId']}: {w['flaw']}" for w in warnings),
+                    "; ".join(self.format_validation_flaw(w) for w in warnings),
                 )
 
             if validation_status == "FAILED":
-                error_msg = "; ".join(f"{e['attributeId']}: {e['flaw']}" for e in errors) if errors else (
-                    "Submission failed with no specific ERROR flaws listed"
+                error_msg = (
+                    "; ".join(self.format_validation_flaw(e) for e in errors)
+                    if errors
+                    else "Submission failed with no specific ERROR flaws listed"
                 )
                 raise InvalidPayloadError(
                     f"Wayfair product validation failed: {error_msg}"
@@ -242,11 +622,7 @@ mutation {{
         class_id = record["classId"]
         attributes = record["attributes"]
 
-        market_context = record.get("marketContext") or {
-            "locale": self.config.get("locale", "en-US"),
-            "country": self.config.get("country", "UNITED_STATES"),
-            "brand": self.config.get("brand", "WAYFAIR"),
-        }
+        market_context = self.resolve_market_context(record)
         job_context = record.get("jobContext") or {
             "productAdditionRequestId": None,
             "hasMoreProducts": False,
