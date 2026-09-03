@@ -10,6 +10,7 @@ from hotglue_singer_sdk.plugin_base import PluginBase
 from hotglue_singer_sdk.target_sdk.client import HotglueSink
 
 from target_wayfair.auth import WayfairAuth
+from target_wayfair.export_errors import general_export_error, structured_export_error
 
 LOGGER = singer.get_logger()
 
@@ -136,7 +137,7 @@ class WayfairSink(HotglueSink):
         try:
             class_id_gql = int(class_id)
         except (TypeError, ValueError):
-            raise InvalidPayloadError(
+            raise general_export_error(
                 f"Wayfair classId must be an integer, got {class_id!r}"
             )
 
@@ -531,14 +532,17 @@ query GetTaxonomyAttributesByFilter {{
                 )
 
             if validation_status == "FAILED":
-                error_msg = (
-                    "; ".join(self.format_validation_flaw(e) for e in errors)
-                    if errors
-                    else "Submission failed with no specific ERROR flaws listed"
-                )
-                raise InvalidPayloadError(
-                    f"Wayfair product validation failed: {error_msg}"
-                )
+                attribute_errors: dict[str, list[str]] = {}
+                for flaw in errors:
+                    attr_id = str(flaw.get("attributeId") or "_general")
+                    attribute_errors.setdefault(attr_id, []).append(
+                        self.format_validation_flaw(flaw)
+                    )
+                if not attribute_errors:
+                    attribute_errors["_general"] = [
+                        "Submission failed with no specific ERROR flaws listed"
+                    ]
+                raise structured_export_error(attribute_errors)
 
             # VALIDATED (or any non-FAILED terminal status).
             return status

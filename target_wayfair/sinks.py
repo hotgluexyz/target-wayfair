@@ -1,7 +1,7 @@
 import singer
-from hotglue_etl_exceptions import InvalidPayloadError
 
 from target_wayfair.client import WayfairSink
+from target_wayfair.export_errors import general_export_error, structured_export_error
 
 LOGGER = singer.get_logger()
 
@@ -39,13 +39,13 @@ class ProductsSink(WayfairSink):
         """Validate required fields and drop attributes Wayfair does not support."""
         missing = [f for f in ("productId", "classId", "attributes") if not record.get(f)]
         if missing:
-            raise InvalidPayloadError(
+            raise general_export_error(
                 f"Wayfair Products record is missing required fields: {', '.join(missing)}"
             )
 
         attributes = record["attributes"]
         if not isinstance(attributes, list):
-            raise InvalidPayloadError(
+            raise general_export_error(
                 "Wayfair Products record 'attributes' must be a list"
             )
 
@@ -71,7 +71,7 @@ class ProductsSink(WayfairSink):
             )
 
         if not kept:
-            raise InvalidPayloadError(
+            raise general_export_error(
                 f"Wayfair Products record for {record.get('productId')} has no "
                 f"attributes supported by classId {record.get('classId')}"
             )
@@ -80,11 +80,11 @@ class ProductsSink(WayfairSink):
         for i, attr in enumerate(record["attributes"]):
             for field in ("attributeId", "value", "parentRank", "rank"):
                 if attr.get(field) is None:
-                    raise InvalidPayloadError(
+                    raise general_export_error(
                         f"attributes[{i}] is missing required field '{field}'"
                     )
 
-        issues = []
+        attribute_errors: dict[str, list[str]] = {}
         for attr in record["attributes"]:
             spec = supported[str(attr["attributeId"])]
             attr["value"] = self.normalize_attribute_value(attr["value"], spec)
@@ -92,16 +92,9 @@ class ProductsSink(WayfairSink):
                 attr["attributeId"], attr.get("value"), spec
             )
             if issue:
-                issues.append(issue)
+                attribute_errors.setdefault(str(attr["attributeId"]), []).append(issue)
 
-        if issues:
-            product_id = record.get("productId")
-            if len(issues) == 1:
-                raise InvalidPayloadError(
-                    f"Product {product_id} has invalid attribute: {issues[0]}"
-                )
-            raise InvalidPayloadError(
-                f"Product {product_id} has invalid attributes: {'; '.join(issues)}"
-            )
+        if attribute_errors:
+            raise structured_export_error(attribute_errors)
 
         return record
