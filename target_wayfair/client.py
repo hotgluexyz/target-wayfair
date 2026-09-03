@@ -620,11 +620,35 @@ mutation {{
 }}
 """
 
+    @staticmethod
+    def resolve_submission_product_id(record: dict) -> str:
+        """Return the productId sent to Wayfair submitV2.
+
+        Wayfair treats the submission productId as the supplier part number for
+        catalog uniqueness. When core::supplierPartNumber is present, use it so
+        the top-level productId matches the attribute value Plytix mapped.
+        """
+        for attr in record.get("attributes") or []:
+            if str(attr.get("attributeId")) == "core::supplierPartNumber":
+                value = attr.get("value")
+                if value is not None and str(value).strip():
+                    return str(value).strip()
+        return str(record["productId"])
+
     def upsert_record(self, record: dict, context: dict):
         """Submit one product and wait for validation to complete."""
-        product_id = record["productId"]
+        record_product_id = record["productId"]
+        wayfair_product_id = self.resolve_submission_product_id(record)
         class_id = record["classId"]
         attributes = record["attributes"]
+
+        if wayfair_product_id != record_product_id:
+            LOGGER.info(
+                "Using core::supplierPartNumber %s as Wayfair productId "
+                "(record productId is %s)",
+                wayfair_product_id,
+                record_product_id,
+            )
 
         market_context = self.resolve_market_context(record)
         job_context = record.get("jobContext") or {
@@ -633,7 +657,7 @@ mutation {{
         }
 
         mutation = self._build_submit_mutation(
-            product_id, class_id, attributes, market_context, job_context
+            wayfair_product_id, class_id, attributes, market_context, job_context
         )
         body = self._graphql(mutation)
         submit_result = (
@@ -642,20 +666,23 @@ mutation {{
         request_id = submit_result.get("productAdditionRequestId")
         if not request_id:
             raise FatalAPIError(
-                f"Wayfair submitV2 returned no productAdditionRequestId for product {product_id}. "
+                f"Wayfair submitV2 returned no productAdditionRequestId for product "
+                f"{record_product_id} (Wayfair productId {wayfair_product_id}). "
                 f"Response: {submit_result}"
             )
         LOGGER.info(
-            "Submitted product %s → batchId=%s requestId=%s",
-            product_id,
+            "Submitted product %s (Wayfair productId %s) → batchId=%s requestId=%s",
+            record_product_id,
+            wayfair_product_id,
             submit_result.get("batchId"),
             request_id,
         )
 
         status = self.poll_submission_status(request_id)
         LOGGER.info(
-            "Product %s validated: validationStatus=%s",
-            product_id,
+            "Product %s (Wayfair productId %s) validated: validationStatus=%s",
+            record_product_id,
+            wayfair_product_id,
             status.get("validationStatus"),
         )
-        return product_id, True, {}
+        return record_product_id, True, {}

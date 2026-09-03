@@ -62,6 +62,7 @@ Records are passed through directly to the Wayfair API without a fixed field map
   "productId": "YOUR-SKU-001",
   "classId": "12",
   "attributes": [
+    {"attributeId": "core::supplierPartNumber", "value": "YOUR-SKU-001", "parentRank": 1, "rank": 1},
     {"attributeId": "core::productName", "value": "My Bed", "parentRank": 1, "rank": 1},
     {"attributeId": "price::wholesalePrice", "value": "199.99", "parentRank": 1, "rank": 1},
     {"attributeId": "shippingAndFulfillment::depth", "value": "12.0", "parentRank": 1, "rank": 1, "attributeInstance": 1}
@@ -72,6 +73,10 @@ Records are passed through directly to the Wayfair API without a fixed field map
 ```
 
 `marketContext` and `jobContext` are optional; they default to the config values (or `en-US / UNITED_STATES / WAYFAIR`) when omitted. Set `hasMoreProducts: true` and reuse `productAdditionRequestId` to send a large catalog in chunks.
+
+`productId` is the Singer/hotglue record key (e.g. your Plytix SKU). Wayfair's `submitV2` mutation also sends a top-level `productId`, which must match the catalog's supplier part number. When `core::supplierPartNumber` is present in `attributes`, the target uses that value as the Wayfair `productId`. Changing only the attribute while leaving the record `productId` as an older SKU will not bypass Wayfair duplicate-part-number validation.
+
+`productAddition.submitV2` creates **new** catalog items only. If a supplier part number already exists in your Wayfair catalog (including from earlier test exports), you must use the catalog update APIs instead of re-submitting it as a new product.
 
 After each submission the target polls `productAddition.submissionsV2` until `submissionStatus` leaves `PROCESSING`. If `validationStatus` is `FAILED`, an `InvalidPayloadError` is raised with the Wayfair flaw messages. Warnings are logged but do not block processing.
 

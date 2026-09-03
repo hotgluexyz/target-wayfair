@@ -7,9 +7,30 @@ from typing import Any, Dict
 import pytest
 from hotglue_singer_sdk.testing import get_standard_target_tests
 
+from target_wayfair.client import WayfairSink
 from target_wayfair.target import TargetWayfair
 
 SECRETS_PATH = os.path.join(os.path.dirname(__file__), "..", "..", ".secrets", "config.json")
+
+
+def test_resolve_submission_product_id_prefers_supplier_part_number():
+    record = {
+        "productId": "PLY-BED-0004",
+        "attributes": [
+            {
+                "attributeId": "core::supplierPartNumber",
+                "value": "PLY-BED-0004-UNIQUE",
+                "parentRank": 1,
+                "rank": 1,
+            }
+        ],
+    }
+    assert WayfairSink.resolve_submission_product_id(record) == "PLY-BED-0004-UNIQUE"
+
+
+def test_resolve_submission_product_id_falls_back_to_record_product_id():
+    record = {"productId": "PLY-BED-0004", "attributes": []}
+    assert WayfairSink.resolve_submission_product_id(record) == "PLY-BED-0004"
 
 
 @pytest.fixture
