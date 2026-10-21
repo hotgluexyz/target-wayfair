@@ -28,22 +28,49 @@ pip install git+https://github.com/hotgluexyz/target-wayfair.git
 | `locale` | No | Market locale, default `en-US` |
 | `country` | No | Market country enum, default `UNITED_STATES` |
 | `brand` | No | Brand enum, default `WAYFAIR` |
+| `is_sandbox` | No | When `true`, use the sandbox Product Catalog API (`api.wayfair.io/sandbox`). Set this for sandbox supplier credentials. |
 
-Example `config.json`:
+hotglue may also pass `access_token`, `refresh_token`, and `expires_in` after an OAuth link in the UI. You do not need to set those manually.
+
+**Client credentials** (manual or internal sandbox app):
 
 ```json
 {
   "client_id": "your-client-id",
   "client_secret": "your-client-secret",
-  "supplier_id": "12345"
+  "supplier_id": "12345",
+  "is_sandbox": true
+}
+```
+
+**Developer Portal OAuth** (hotglue connect; includes `refresh_token`):
+
+```json
+{
+  "client_id": "vendor-…",
+  "client_secret": "…",
+  "supplier_id": "12345",
+  "is_sandbox": true,
+  "access_token": "…",
+  "refresh_token": "…",
+  "expires_in": 3600
 }
 ```
 
 ---
 
-## Source Authentication and Authorization
+## Authentication
 
-The target uses OAuth2 client credentials. Wayfair issues a `client_id` and `client_secret` through their supplier portal. The target exchanges them for a Bearer token at `https://sso.auth.wayfair.com/oauth/token` and refreshes automatically when the 24-hour token expires.
+Wayfair supports two OAuth 2.0 flows. The target picks the flow from config:
+
+| Config | Flow | Token endpoint |
+|---|---|---|
+| No `refresh_token` | [Client credentials](https://developer.wayfair.io/posts/api-access-tokens) | `https://sso.auth.wayfair.com/oauth/token` (JSON body) |
+| `refresh_token` present | Developer Portal authorization code (hotglue UI) | `https://partners.wayfair.com/auth/realms/Developer_Portal/protocol/openid-connect/token` (form body, refresh grant) |
+
+Tokens are refreshed automatically when they are close to expiry. With `TargetWayfair.access_token_support`, jobs can also refresh via the hotglue accesstoken API before calling Wayfair locally.
+
+Catalog requests use production `https://api.wayfair.io/v1/product-catalog-api/graphql` unless `is_sandbox` is `true`.
 
 ---
 

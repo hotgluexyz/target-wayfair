@@ -4,7 +4,7 @@ from typing import Dict, List, Optional, Tuple
 
 import requests
 import singer
-from hotglue_etl_exceptions import InvalidCredentialsError, InvalidPayloadError
+from hotglue_etl_exceptions import InvalidCredentialsError
 from hotglue_singer_sdk.exceptions import FatalAPIError, RetriableAPIError
 from hotglue_singer_sdk.plugin_base import PluginBase
 from hotglue_singer_sdk.target_sdk.client import HotglueSink
@@ -14,7 +14,19 @@ from target_wayfair.export_errors import general_export_error, structured_export
 
 LOGGER = singer.get_logger()
 
-GRAPHQL_URL = "https://api.wayfair.io/v1/product-catalog-api/graphql"
+DEFAULT_CATALOG_API_BASE = "https://api.wayfair.io"
+SANDBOX_CATALOG_API_BASE = "https://api.wayfair.io/sandbox"
+CATALOG_GRAPHQL_PATH = "/v1/product-catalog-api/graphql"
+
+GRAPHQL_URL = f"{DEFAULT_CATALOG_API_BASE}{CATALOG_GRAPHQL_PATH}"
+
+
+def catalog_graphql_url(config: dict) -> str:
+    """Resolve Product Catalog GraphQL URL from target config (sandbox vs production)."""
+    if config.get("is_sandbox"):
+        return f"{SANDBOX_CATALOG_API_BASE}{CATALOG_GRAPHQL_PATH}"
+    return GRAPHQL_URL
+
 
 # Maximum number of attempts when polling for a non-PROCESSING status.
 POLL_MAX_ATTEMPTS = 20
@@ -38,7 +50,7 @@ class WayfairSink(HotglueSink):
 
     @property
     def base_url(self) -> str:
-        return GRAPHQL_URL
+        return catalog_graphql_url(self.config)
 
     def _graphql(self, query: str) -> dict:
         """Send a raw GraphQL query/mutation string and return the parsed JSON body."""

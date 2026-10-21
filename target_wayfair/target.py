@@ -4,6 +4,7 @@ from hotglue_singer_sdk import typing as th
 from hotglue_singer_sdk.helpers.capabilities import AlertingLevel
 from hotglue_singer_sdk.target_sdk.target import TargetHotglue
 
+from target_wayfair.auth import CLIENT_CREDENTIALS_TOKEN_URL, WayfairAuth
 from target_wayfair.sinks import ProductsSink
 
 
@@ -15,6 +16,15 @@ class TargetWayfair(TargetHotglue):
     ]
     name = "target-wayfair"
     alerting_level = AlertingLevel.ERROR
+
+    @classmethod
+    def access_token_support(cls, connector=None):
+        """Declare token refresh for Hotglue ``--access-token`` and job accesstoken API.
+
+        The returned URL is a placeholder for the SDK; ``WayfairAuth`` picks the real
+        endpoint from config (portal refresh vs client credentials).
+        """
+        return WayfairAuth, CLIENT_CREDENTIALS_TOKEN_URL
 
     def __init__(
         self,
@@ -38,6 +48,7 @@ class TargetWayfair(TargetHotglue):
         th.Property("locale", th.StringType, required=False),
         th.Property("country", th.StringType, required=False),
         th.Property("brand", th.StringType, required=False),
+        th.Property("is_sandbox", th.BooleanType, required=False),
     ).to_dict()
 
 
