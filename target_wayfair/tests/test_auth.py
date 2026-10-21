@@ -7,12 +7,17 @@ from unittest.mock import MagicMock
 
 from target_wayfair.auth import (
     CLIENT_CREDENTIALS_TOKEN_URL,
+    EXPIRES_IN_ABSOLUTE_THRESHOLD,
     PORTAL_TOKEN_URL,
     WayfairAuth,
     token_url_for_config,
     uses_portal_oauth,
 )
-from target_wayfair.client import SANDBOX_CATALOG_API_BASE, catalog_graphql_url
+from target_wayfair.client import (
+    GRAPHQL_URL,
+    SANDBOX_CATALOG_API_BASE,
+    catalog_graphql_url,
+)
 
 
 def test_uses_portal_oauth_when_refresh_token_present():
@@ -55,7 +60,7 @@ def test_is_token_valid_uses_jwt_exp():
     assert auth.is_token_valid()
 
 
-def test_is_token_valid_ttl_expires_in():
+def test_ttl_expires_in_normalized_to_absolute():
     target = MagicMock()
     target._config = {
         "access_token": "not-a-jwt",
@@ -63,8 +68,13 @@ def test_is_token_valid_ttl_expires_in():
     }
     auth = WayfairAuth(target)
     assert auth.is_token_valid()
+    exp1 = auth._access_token_expires_at()
+    exp2 = auth._access_token_expires_at()
+    assert exp1 == exp2
+    assert target._config["expires_in"] >= EXPIRES_IN_ABSOLUTE_THRESHOLD
 
 
 def test_catalog_graphql_url_sandbox_and_production():
     assert catalog_graphql_url({"is_sandbox": True}).startswith(SANDBOX_CATALOG_API_BASE)
-    assert catalog_graphql_url({}) == catalog_graphql_url({"is_sandbox": False})
+    assert catalog_graphql_url({}) == GRAPHQL_URL
+    assert catalog_graphql_url({"is_sandbox": False}) == GRAPHQL_URL

@@ -90,6 +90,7 @@ class WayfairAuth(OAuthAuthenticator):
 
         Prefer JWT ``exp`` for portal tokens. Otherwise interpret ``expires_in`` as
         absolute expiry if large, or as remaining TTL seconds (hotglue connect shape).
+        TTL ``expires_in`` is converted to absolute expiry once in config.
         """
         token = self._config.get("access_token")
         if isinstance(token, str) and token.count(".") == 2:
@@ -111,7 +112,10 @@ class WayfairAuth(OAuthAuthenticator):
         now = _utc_now_ts()
         if expires_in >= EXPIRES_IN_ABSOLUTE_THRESHOLD:
             return expires_in
-        return now + expires_in
+
+        absolute = now + expires_in
+        self._config["expires_in"] = absolute
+        return absolute
 
     def _update_access_token_locally(self) -> None:
         """POST to Wayfair token URL; portal uses form body, M2M uses JSON."""
