@@ -202,6 +202,53 @@ query GetTaxonomyAttributesByFilter {{
                 return spec
         return None
 
+    # Wayfair taxonomy attribute "1" is the product class name (title: "Class ID").
+    CLASS_NAME_ATTRIBUTE_ID = "1"
+
+    def ensure_class_name_attribute(
+        self, attributes: list, class_id, supported: Dict[str, dict]
+    ) -> list:
+        """Inject attributeId 1 (class name) when missing from the record.
+
+        ``classId`` on the root record already identifies the class; Wayfair still
+        requires attribute ``1`` with the class display name. That name is the sole
+        possible value on the class-filtered taxonomy for attribute ``1``.
+        """
+        if any(
+            str(attr.get("attributeId")) == self.CLASS_NAME_ATTRIBUTE_ID
+            for attr in attributes
+        ):
+            return attributes
+
+        spec = supported.get(self.CLASS_NAME_ATTRIBUTE_ID)
+        if not spec:
+            return attributes
+
+        possible = self._possible_values(spec)
+        if len(possible) != 1:
+            raise general_export_error(
+                f"Wayfair class attribute ({self.CLASS_NAME_ATTRIBUTE_ID}) for "
+                f"classId {class_id} must have exactly one possible value; "
+                f"got {possible!r}"
+            )
+
+        class_name = possible[0]
+        LOGGER.info(
+            "Injecting class name attribute %s=%r for classId %s",
+            self.CLASS_NAME_ATTRIBUTE_ID,
+            class_name,
+            class_id,
+        )
+        return [
+            {
+                "attributeId": self.CLASS_NAME_ATTRIBUTE_ID,
+                "value": class_name,
+                "parentRank": 1,
+                "rank": 1,
+            },
+            *attributes,
+        ]
+
     @staticmethod
     def _possible_values(spec: dict) -> List[str]:
         values = []

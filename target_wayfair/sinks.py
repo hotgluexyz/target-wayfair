@@ -52,6 +52,9 @@ class ProductsSink(WayfairSink):
         supported = self.get_supported_attributes(
             record["classId"], self.resolve_market_context(record)
         )
+        attributes = self.ensure_class_name_attribute(
+            attributes, record["classId"], supported
+        )
         kept = []
         dropped = []
         for attr in attributes:

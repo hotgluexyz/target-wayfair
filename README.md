@@ -103,6 +103,8 @@ Records are passed through directly to the Wayfair API without a fixed field map
 
 `productId` is the Singer/hotglue record key (e.g. your Plytix SKU). Wayfair's `submitV2` mutation also sends a top-level `productId`, which must match the catalog's supplier part number. When `core::supplierPartNumber` is present in `attributes`, the target uses that value as the Wayfair `productId`. Changing only the attribute while leaving the record `productId` as an older SKU will not bypass Wayfair duplicate-part-number validation.
 
+Attribute `1` is Wayfair's class name (e.g. `"Beds"` for `classId` `"12"`). If it is omitted from `attributes`, the target resolves it from the class taxonomy and injects it automatically — you only need to send `classId` on the root record.
+
 `productAddition.submitV2` creates **new** catalog items only. If a supplier part number already exists in your Wayfair catalog (including from earlier test exports), you must use the catalog update APIs instead of re-submitting it as a new product.
 
 After each submission the target polls `productAddition.submissionsV2` until `submissionStatus` leaves `PROCESSING`. If `validationStatus` is `FAILED`, an `InvalidPayloadError` is raised with the Wayfair flaw messages. Warnings are logged but do not block processing.
