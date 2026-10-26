@@ -208,18 +208,12 @@ query GetTaxonomyAttributesByFilter {{
     def ensure_class_name_attribute(
         self, attributes: list, class_id, supported: Dict[str, dict]
     ) -> list:
-        """Inject attributeId 1 (class name) when missing from the record.
+        """Set attributeId 1 (class name) from taxonomy, always overriding any value.
 
         ``classId`` on the root record already identifies the class; Wayfair still
         requires attribute ``1`` with the class display name. That name is the sole
         possible value on the class-filtered taxonomy for attribute ``1``.
         """
-        if any(
-            str(attr.get("attributeId")) == self.CLASS_NAME_ATTRIBUTE_ID
-            for attr in attributes
-        ):
-            return attributes
-
         spec = supported.get(self.CLASS_NAME_ATTRIBUTE_ID)
         if not spec:
             return attributes
@@ -233,21 +227,24 @@ query GetTaxonomyAttributesByFilter {{
             )
 
         class_name = possible[0]
+        class_attr = {
+            "attributeId": self.CLASS_NAME_ATTRIBUTE_ID,
+            "value": class_name,
+            "parentRank": 1,
+            "rank": 1,
+        }
+        others = [
+            attr
+            for attr in attributes
+            if str(attr.get("attributeId")) != self.CLASS_NAME_ATTRIBUTE_ID
+        ]
         LOGGER.info(
-            "Injecting class name attribute %s=%r for classId %s",
+            "Setting class name attribute %s=%r for classId %s",
             self.CLASS_NAME_ATTRIBUTE_ID,
             class_name,
             class_id,
         )
-        return [
-            {
-                "attributeId": self.CLASS_NAME_ATTRIBUTE_ID,
-                "value": class_name,
-                "parentRank": 1,
-                "rank": 1,
-            },
-            *attributes,
-        ]
+        return [class_attr, *others]
 
     @staticmethod
     def _possible_values(spec: dict) -> List[str]:

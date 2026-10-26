@@ -61,9 +61,9 @@ def test_ensure_class_name_attribute_injects_when_missing():
     assert result[1:] == attributes
 
 
-def test_ensure_class_name_attribute_leaves_existing():
+def test_ensure_class_name_attribute_overrides_existing():
     attributes = [
-        {"attributeId": "1", "value": "Beds", "parentRank": 1, "rank": 1},
+        {"attributeId": "1", "value": "Wrong Class", "parentRank": 1, "rank": 1},
         {
             "attributeId": "core::productName",
             "value": "My Bed",
@@ -78,12 +78,18 @@ def test_ensure_class_name_attribute_leaves_existing():
             "possibleAttributeValues": [{"value": "Beds"}],
         }
     }
-    assert (
-        WayfairSink.ensure_class_name_attribute(
-            WayfairSink, attributes, "12", supported
-        )
-        is attributes
+    result = WayfairSink.ensure_class_name_attribute(
+        WayfairSink, attributes, "12", supported
     )
+    assert result == [
+        {"attributeId": "1", "value": "Beds", "parentRank": 1, "rank": 1},
+        {
+            "attributeId": "core::productName",
+            "value": "My Bed",
+            "parentRank": 1,
+            "rank": 1,
+        },
+    ]
 
 
 @pytest.fixture
