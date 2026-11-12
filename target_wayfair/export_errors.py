@@ -1,7 +1,5 @@
 """Structured export errors for Hotglue export details."""
 
-from __future__ import annotations
-
 import json
 
 from hotglue_etl_exceptions import InvalidPayloadError

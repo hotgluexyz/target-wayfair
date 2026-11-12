@@ -1,9 +1,7 @@
 """Variant grouping and multi-product submitV2 / submissionsV2 poll helpers."""
 
-from __future__ import annotations
-
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Callable, Dict, List, Optional
 
 from target_wayfair.export_errors import structured_export_error
 
@@ -16,7 +14,7 @@ NON_PRIMARY_VARIANT = "Non-Primary Variant"
 _GROUPED_VARIANT_TYPES = frozenset({PRIMARY_VARIANT, NON_PRIMARY_VARIANT})
 
 
-def attribute_value(record: dict, attribute_id: str) -> Optional[str]:
+def attribute_value(record: dict, attribute_id: str) -> str | None:
     """Return the first matching attribute value, or None if missing or empty."""
     for attr in record.get("attributes") or []:
         if str(attr.get("attributeId")) == attribute_id:
@@ -34,7 +32,7 @@ class VariantGroupRef:
     variant_type: str
 
 
-def parse_variant_group_ref(record: dict) -> Optional[VariantGroupRef]:
+def parse_variant_group_ref(record: dict) -> VariantGroupRef | None:
     """Return grouping metadata when the record participates in a variant listing."""
     variant_type = attribute_value(record, VARIANT_TYPE_ATTRIBUTE)
     if variant_type not in _GROUPED_VARIANT_TYPES:
@@ -45,9 +43,9 @@ def parse_variant_group_ref(record: dict) -> Optional[VariantGroupRef]:
     return VariantGroupRef(group_reference_id=group_ref, variant_type=variant_type)
 
 
-def index_submission_rows_by_supplier_part(rows: list) -> Dict[str, dict]:
+def index_submission_rows_by_supplier_part(rows: list) -> dict[str, dict]:
     """Build supplierPartNumber -> status row map from submissionsV2 poll."""
-    indexed: Dict[str, dict] = {}
+    indexed: dict[str, dict] = {}
     for row in rows or []:
         if not isinstance(row, dict):
             continue
@@ -57,7 +55,7 @@ def index_submission_rows_by_supplier_part(rows: list) -> Dict[str, dict]:
     return indexed
 
 
-def submission_rows_terminal(rows: List[dict]) -> bool:
+def submission_rows_terminal(rows: list[dict]) -> bool:
     """Return True when every poll row has left PENDING / PROCESSING states."""
     if not rows:
         return False
@@ -73,9 +71,9 @@ def attribute_errors_from_status_row(
     row: dict,
     *,
     format_flaw: Callable,
-) -> Dict[str, List[str]]:
+) -> dict[str, list[str]]:
     """Turn validationFlaws on one productAdditionStatus row into export errors."""
-    attribute_errors: Dict[str, List[str]] = {}
+    attribute_errors: dict[str, list[str]] = {}
     flaws = row.get("validationFlaws") or []
     for flaw in flaws:
         if flaw.get("flawType") != "ERROR":

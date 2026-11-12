@@ -1,5 +1,3 @@
-from typing import List, Optional
-
 import singer
 from hotglue_singer_sdk.exceptions import FatalAPIError
 
@@ -66,8 +64,8 @@ class ProductsSink(WayfairSink):
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         # Custom: defer Primary / Non-Primary rows until the variant group is flushed.
-        self._variant_batch: List[dict] = []
-        self._variant_group_key: Optional[str] = None
+        self._variant_batch: list[dict] = []
+        self._variant_group_key: str | None = None
 
     def preprocess_record(self, record: dict, context: dict) -> dict:
         """Validate required fields and drop attributes Wayfair does not support."""
@@ -367,7 +365,7 @@ class ProductsSink(WayfairSink):
         *,
         record: dict,
         external_id=None,
-        record_hash: Optional[str] = None,
+        record_hash: str | None = None,
     ) -> dict:
         """Failed bookmark with ``id`` set to ``productId`` (Products stream convention)."""
         state = self._build_record_error_state(

@@ -1,6 +1,5 @@
 import json
 import time
-from typing import Dict, List, Optional, Tuple
 
 import requests
 import singer
@@ -57,22 +56,22 @@ class WayfairSink(HotglueSink):
         self,
         target: PluginBase,
         stream_name: str,
-        schema: Dict,
-        key_properties: Optional[List[str]],
+        schema: dict,
+        key_properties: list[str] | None,
     ) -> None:
         super().__init__(target, stream_name, schema, key_properties)
         self._auth = WayfairAuth(self._target)
         # classId + market → {taxonomyAttributeId: attribute spec}
-        self._taxonomy_attr_cache: Dict[Tuple[str, str, str, str], Dict[str, dict]] = {}
+        self._taxonomy_attr_cache: dict[tuple[str, str, str, str], dict[str, dict]] = {}
 
     @property
     def base_url(self) -> str:
         return catalog_graphql_url(self.config)
 
-    def _graphql(self, query: str, variables: Optional[dict] = None) -> dict:
+    def _graphql(self, query: str, variables: dict | None = None) -> dict:
         """Send a GraphQL operation and return the parsed JSON body."""
         supplier_id = self.config.get("supplier_id", "")
-        payload: Dict = {"query": query}
+        payload: dict = {"query": query}
         if variables is not None:
             payload["variables"] = variables
         response = requests.post(
@@ -132,8 +131,8 @@ class WayfairSink(HotglueSink):
         return []
 
     @staticmethod
-    def _index_taxonomy_attributes(attributes: list) -> Dict[str, dict]:
-        indexed: Dict[str, dict] = {}
+    def _index_taxonomy_attributes(attributes: list) -> dict[str, dict]:
+        indexed: dict[str, dict] = {}
         for attr in attributes or []:
             if not isinstance(attr, dict):
                 continue
@@ -145,7 +144,7 @@ class WayfairSink(HotglueSink):
             )
         return indexed
 
-    def _taxonomy_cache_key(self, class_id, market_context: dict) -> Tuple[str, str, str, str]:
+    def _taxonomy_cache_key(self, class_id, market_context: dict) -> tuple[str, str, str, str]:
         return (
             str(class_id),
             str(market_context.get("brand", "WAYFAIR")),
@@ -153,7 +152,7 @@ class WayfairSink(HotglueSink):
             str(market_context.get("locale", "en-US")),
         )
 
-    def get_supported_attributes(self, class_id, market_context: dict) -> Dict[str, dict]:
+    def get_supported_attributes(self, class_id, market_context: dict) -> dict[str, dict]:
         """Return the full Wayfair attribute spec map for this class + market.
 
         Results are cached for the lifetime of the sink so products that share
@@ -213,7 +212,7 @@ query GetTaxonomyAttributesByFilter {{
         self._taxonomy_attr_cache[cache_key] = supported
         return supported
 
-    def lookup_cached_attribute(self, attribute_id: str) -> Optional[dict]:
+    def lookup_cached_attribute(self, attribute_id: str) -> dict | None:
         """Find a previously fetched attribute spec by taxonomyAttributeId."""
         attr_id = str(attribute_id)
         for specs in self._taxonomy_attr_cache.values():
@@ -226,7 +225,7 @@ query GetTaxonomyAttributesByFilter {{
     CLASS_NAME_ATTRIBUTE_ID = "1"
 
     def ensure_class_name_attribute(
-        self, attributes: list, class_id, supported: Dict[str, dict]
+        self, attributes: list, class_id, supported: dict[str, dict]
     ) -> list:
         """Set attributeId 1 (class name) from taxonomy, always overriding any value.
 
@@ -267,7 +266,7 @@ query GetTaxonomyAttributesByFilter {{
         return [class_attr, *others]
 
     @staticmethod
-    def _possible_values(spec: dict) -> List[str]:
+    def _possible_values(spec: dict) -> list[str]:
         values = []
         for entry in spec.get("possibleAttributeValues") or []:
             if isinstance(entry, dict) and entry.get("value") is not None:
@@ -296,7 +295,7 @@ query GetTaxonomyAttributesByFilter {{
         return ", ".join(parts)
 
     @staticmethod
-    def _label_attribute(attribute_id: str, spec: Optional[dict]) -> str:
+    def _label_attribute(attribute_id: str, spec: dict | None) -> str:
         title = (spec or {}).get("title")
         return f"{attribute_id} ({title})" if title else str(attribute_id)
 
@@ -345,7 +344,7 @@ query GetTaxonomyAttributesByFilter {{
         "canada": "CA",
     }
 
-    def _yes_no_labels(self, spec: dict) -> Tuple[str, str]:
+    def _yes_no_labels(self, spec: dict) -> tuple[str, str]:
         yes, no = "Yes", "No"
         for value in self._possible_values(spec):
             if value.lower() == "yes":
@@ -428,7 +427,7 @@ query GetTaxonomyAttributesByFilter {{
         return self.normalize_boolean_value(value, spec)
 
     @staticmethod
-    def _datatype_issue(value: str, datatype: Optional[str]) -> Optional[str]:
+    def _datatype_issue(value: str, datatype: str | None) -> str | None:
         if datatype == "BOOLEAN" and value.lower() not in {
             "true",
             "false",
@@ -452,7 +451,7 @@ query GetTaxonomyAttributesByFilter {{
 
     def describe_attribute_value_issue(
         self, attribute_id: str, value, spec: dict
-    ) -> Optional[str]:
+    ) -> str | None:
         """Return a detailed error if `value` is not valid for this attribute spec."""
         value_str = str(value)
         value_format = spec.get("valueFormat") or {}
@@ -547,7 +546,7 @@ query GetTaxonomyAttributesByFilter {{
             )
         return rows[0]
 
-    def poll_submission_statuses(self, request_id: str) -> List[dict]:
+    def poll_submission_statuses(self, request_id: str) -> list[dict]:
         """Poll submissionsV2 until every row is terminal; return all status rows."""
         query = f"""
         query {{
@@ -618,7 +617,7 @@ query GetTaxonomyAttributesByFilter {{
     @staticmethod
     def _attribute_to_input(attr: dict) -> dict:
         """Map a Singer attribute entry to Wayfair AttributeInput."""
-        entry: Dict = {
+        entry: dict = {
             "attributeId": str(attr["attributeId"]),
             "value": str(attr["value"]),
             "parentRank": int(attr["parentRank"]),
@@ -632,7 +631,7 @@ query GetTaxonomyAttributesByFilter {{
         self,
         proposed_products: list[dict],
         market_context: dict,
-        job_context: Optional[dict] = None,
+        job_context: dict | None = None,
     ) -> dict:
         """Build GraphQL variables for productAddition.submitV2."""
         if not proposed_products:
@@ -688,8 +687,8 @@ query GetTaxonomyAttributesByFilter {{
         self,
         records: list[dict],
         *,
-        job_context: Optional[dict] = None,
-    ) -> Tuple[str, List[dict]]:
+        job_context: dict | None = None,
+    ) -> tuple[str, list[dict]]:
         """Submit one or more preprocessed records in a single submitV2 and poll."""
         if not records:
             raise FatalAPIError("submit_records called with no records")
