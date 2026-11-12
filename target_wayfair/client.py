@@ -1,6 +1,5 @@
 import json
 import time
-from typing import Dict, List, Optional, Tuple
 
 import requests
 import singer
@@ -10,7 +9,12 @@ from hotglue_singer_sdk.plugin_base import PluginBase
 from hotglue_singer_sdk.target_sdk.client import HotglueSink
 
 from target_wayfair.auth import WayfairAuth
-from target_wayfair.export_errors import general_export_error, structured_export_error
+from target_wayfair.export_errors import general_export_error
+from target_wayfair.submission_batch import (
+    index_submission_rows_by_supplier_part,
+    raise_for_failed_status_row,
+    submission_rows_terminal,
+)
 
 LOGGER = singer.get_logger()
 
@@ -32,6 +36,18 @@ def catalog_graphql_url(config: dict) -> str:
 POLL_MAX_ATTEMPTS = 20
 POLL_SLEEP_SECONDS = 3
 
+SUBMIT_V2_MUTATION = """
+mutation SubmitProductAdditions($request: SubmitProductAdditionsRequestV2!) {
+  productAddition {
+    submitV2(request: $request) {
+      batchId
+      status
+      productAdditionRequestId
+    }
+  }
+}
+"""
+
 
 class WayfairSink(HotglueSink):
     """Base sink for the Wayfair Product Catalog GraphQL API."""
@@ -40,21 +56,24 @@ class WayfairSink(HotglueSink):
         self,
         target: PluginBase,
         stream_name: str,
-        schema: Dict,
-        key_properties: Optional[List[str]],
+        schema: dict,
+        key_properties: list[str] | None,
     ) -> None:
         super().__init__(target, stream_name, schema, key_properties)
         self._auth = WayfairAuth(self._target)
         # classId + market → {taxonomyAttributeId: attribute spec}
-        self._taxonomy_attr_cache: Dict[Tuple[str, str, str, str], Dict[str, dict]] = {}
+        self._taxonomy_attr_cache: dict[tuple[str, str, str, str], dict[str, dict]] = {}
 
     @property
     def base_url(self) -> str:
         return catalog_graphql_url(self.config)
 
-    def _graphql(self, query: str) -> dict:
-        """Send a raw GraphQL query/mutation string and return the parsed JSON body."""
+    def _graphql(self, query: str, variables: dict | None = None) -> dict:
+        """Send a GraphQL operation and return the parsed JSON body."""
         supplier_id = self.config.get("supplier_id", "")
+        payload: dict = {"query": query}
+        if variables is not None:
+            payload["variables"] = variables
         response = requests.post(
             self.base_url,
             headers={
@@ -62,7 +81,7 @@ class WayfairSink(HotglueSink):
                 "Content-Type": "application/json",
                 "X-SELECTED-SUPPLIER-ID": str(supplier_id),
             },
-            json={"query": query},
+            json=payload,
             timeout=30,
         )
         self.validate_response(response)
@@ -112,8 +131,8 @@ class WayfairSink(HotglueSink):
         return []
 
     @staticmethod
-    def _index_taxonomy_attributes(attributes: list) -> Dict[str, dict]:
-        indexed: Dict[str, dict] = {}
+    def _index_taxonomy_attributes(attributes: list) -> dict[str, dict]:
+        indexed: dict[str, dict] = {}
         for attr in attributes or []:
             if not isinstance(attr, dict):
                 continue
@@ -125,7 +144,7 @@ class WayfairSink(HotglueSink):
             )
         return indexed
 
-    def _taxonomy_cache_key(self, class_id, market_context: dict) -> Tuple[str, str, str, str]:
+    def _taxonomy_cache_key(self, class_id, market_context: dict) -> tuple[str, str, str, str]:
         return (
             str(class_id),
             str(market_context.get("brand", "WAYFAIR")),
@@ -133,7 +152,7 @@ class WayfairSink(HotglueSink):
             str(market_context.get("locale", "en-US")),
         )
 
-    def get_supported_attributes(self, class_id, market_context: dict) -> Dict[str, dict]:
+    def get_supported_attributes(self, class_id, market_context: dict) -> dict[str, dict]:
         """Return the full Wayfair attribute spec map for this class + market.
 
         Results are cached for the lifetime of the sink so products that share
@@ -193,7 +212,7 @@ query GetTaxonomyAttributesByFilter {{
         self._taxonomy_attr_cache[cache_key] = supported
         return supported
 
-    def lookup_cached_attribute(self, attribute_id: str) -> Optional[dict]:
+    def lookup_cached_attribute(self, attribute_id: str) -> dict | None:
         """Find a previously fetched attribute spec by taxonomyAttributeId."""
         attr_id = str(attribute_id)
         for specs in self._taxonomy_attr_cache.values():
@@ -206,7 +225,7 @@ query GetTaxonomyAttributesByFilter {{
     CLASS_NAME_ATTRIBUTE_ID = "1"
 
     def ensure_class_name_attribute(
-        self, attributes: list, class_id, supported: Dict[str, dict]
+        self, attributes: list, class_id, supported: dict[str, dict]
     ) -> list:
         """Set attributeId 1 (class name) from taxonomy, always overriding any value.
 
@@ -247,7 +266,7 @@ query GetTaxonomyAttributesByFilter {{
         return [class_attr, *others]
 
     @staticmethod
-    def _possible_values(spec: dict) -> List[str]:
+    def _possible_values(spec: dict) -> list[str]:
         values = []
         for entry in spec.get("possibleAttributeValues") or []:
             if isinstance(entry, dict) and entry.get("value") is not None:
@@ -276,7 +295,7 @@ query GetTaxonomyAttributesByFilter {{
         return ", ".join(parts)
 
     @staticmethod
-    def _label_attribute(attribute_id: str, spec: Optional[dict]) -> str:
+    def _label_attribute(attribute_id: str, spec: dict | None) -> str:
         title = (spec or {}).get("title")
         return f"{attribute_id} ({title})" if title else str(attribute_id)
 
@@ -325,7 +344,7 @@ query GetTaxonomyAttributesByFilter {{
         "canada": "CA",
     }
 
-    def _yes_no_labels(self, spec: dict) -> Tuple[str, str]:
+    def _yes_no_labels(self, spec: dict) -> tuple[str, str]:
         yes, no = "Yes", "No"
         for value in self._possible_values(spec):
             if value.lower() == "yes":
@@ -408,7 +427,7 @@ query GetTaxonomyAttributesByFilter {{
         return self.normalize_boolean_value(value, spec)
 
     @staticmethod
-    def _datatype_issue(value: str, datatype: Optional[str]) -> Optional[str]:
+    def _datatype_issue(value: str, datatype: str | None) -> str | None:
         if datatype == "BOOLEAN" and value.lower() not in {
             "true",
             "false",
@@ -432,7 +451,7 @@ query GetTaxonomyAttributesByFilter {{
 
     def describe_attribute_value_issue(
         self, attribute_id: str, value, spec: dict
-    ) -> Optional[str]:
+    ) -> str | None:
         """Return a detailed error if `value` is not valid for this attribute spec."""
         value_str = str(value)
         value_format = spec.get("valueFormat") or {}
@@ -519,16 +538,22 @@ query GetTaxonomyAttributesByFilter {{
             raise FatalAPIError(f"Wayfair GraphQL error: {msg}")
 
     def poll_submission_status(self, request_id: str) -> dict:
-        """Poll submissionsV2 until the batch leaves PROCESSING status.
+        """Poll submissionsV2 until the batch completes; return the first status row."""
+        rows = self.poll_submission_statuses(request_id)
+        if not rows:
+            raise FatalAPIError(
+                f"Wayfair submission {request_id} returned no productAdditionStatus rows"
+            )
+        return rows[0]
 
-        Returns the first productAdditionStatus entry on completion.
-        Raises InvalidPayloadError when validationStatus is FAILED (ERROR-level flaws).
-        """
+    def poll_submission_statuses(self, request_id: str) -> list[dict]:
+        """Poll submissionsV2 until every row is terminal; return all status rows."""
         query = f"""
         query {{
           productAddition {{
             submissionsV2(request: {{ productAdditionRequestId: "{request_id}" }}) {{
               productAdditionStatus {{
+                supplierPartNumber
                 classId
                 submissionStatus
                 validationStatus
@@ -558,50 +583,31 @@ query GetTaxonomyAttributesByFilter {{
                 time.sleep(POLL_SLEEP_SECONDS)
                 continue
 
-            status = statuses[0]
-            submission_status = status.get("submissionStatus")
-            validation_status = status.get("validationStatus")
-
-            LOGGER.info(
-                "Submission %s: submissionStatus=%s validationStatus=%s",
-                request_id,
-                submission_status,
-                validation_status,
-            )
-
-            # Both submissionStatus=PROCESSING and validationStatus=PENDING are
-            # intermediate states; keep polling until both resolve.
-            if submission_status == "PROCESSING" or validation_status == "PENDING":
+            if not submission_rows_terminal(statuses):
+                summary = ", ".join(
+                    f"{row.get('supplierPartNumber')}:{row.get('validationStatus')}"
+                    for row in statuses
+                )
+                LOGGER.info(
+                    "Submission %s still processing (%d row(s)): %s",
+                    request_id,
+                    len(statuses),
+                    summary,
+                )
                 time.sleep(POLL_SLEEP_SECONDS)
                 continue
 
-            # Batch has finished processing.
-            flaws = status.get("validationFlaws", [])
-            errors = [f for f in flaws if f.get("flawType") == "ERROR"]
-            warnings = [f for f in flaws if f.get("flawType") == "WARNING"]
-
-            if warnings:
-                LOGGER.warning(
-                    "Wayfair validation warnings for %s: %s",
-                    request_id,
-                    "; ".join(self.format_validation_flaw(w) for w in warnings),
-                )
-
-            if validation_status == "FAILED":
-                attribute_errors: dict[str, list[str]] = {}
-                for flaw in errors:
-                    attr_id = str(flaw.get("attributeId") or "_general")
-                    attribute_errors.setdefault(attr_id, []).append(
-                        self.format_validation_flaw(flaw)
+            for row in statuses:
+                flaws = row.get("validationFlaws") or []
+                warnings = [f for f in flaws if f.get("flawType") == "WARNING"]
+                if warnings:
+                    LOGGER.warning(
+                        "Wayfair validation warnings for %s (%s): %s",
+                        request_id,
+                        row.get("supplierPartNumber"),
+                        "; ".join(self.format_validation_flaw(w) for w in warnings),
                     )
-                if not attribute_errors:
-                    attribute_errors["_general"] = [
-                        "Submission failed with no specific ERROR flaws listed"
-                    ]
-                raise structured_export_error(attribute_errors)
-
-            # VALIDATED (or any non-FAILED terminal status).
-            return status
+            return statuses
 
         raise RetriableAPIError(
             f"Wayfair submission {request_id} stayed PROCESSING after "
@@ -609,72 +615,58 @@ query GetTaxonomyAttributesByFilter {{
         )
 
     @staticmethod
-    def _attr_to_gql(attr: dict) -> str:
-        """Serialize a single attribute entry to an inline GraphQL object literal.
-
-        Uses json.dumps() for string values to handle escaping correctly.
-        """
-        parts = [
-            f"attributeId: {json.dumps(str(attr['attributeId']))}",
-            f"value: {json.dumps(str(attr['value']))}",
-            f"parentRank: {int(attr['parentRank'])}",
-            f"rank: {int(attr['rank'])}",
-        ]
+    def _attribute_to_input(attr: dict) -> dict:
+        """Map a Singer attribute entry to Wayfair AttributeInput."""
+        entry: dict = {
+            "attributeId": str(attr["attributeId"]),
+            "value": str(attr["value"]),
+            "parentRank": int(attr["parentRank"]),
+            "rank": int(attr["rank"]),
+        }
         if attr.get("attributeInstance") is not None:
-            parts.append(f"attributeInstance: {int(attr['attributeInstance'])}")
-        return "{ " + ", ".join(parts) + " }"
+            entry["attributeInstance"] = int(attr["attributeInstance"])
+        return entry
 
-    def _build_submit_mutation(
+    def build_submit_v2_variables(
         self,
-        product_id: str,
-        class_id: str,
-        attributes: list,
+        proposed_products: list[dict],
         market_context: dict,
-        job_context: dict,
-    ) -> str:
-        attrs_gql = "\n              ".join(
-            self._attr_to_gql(a) for a in attributes
-        )
-        locale = json.dumps(market_context.get("locale", "en-US"))
-        country = market_context.get("country", "UNITED_STATES")
-        brand = market_context.get("brand", "WAYFAIR")
-        request_id = (
-            json.dumps(job_context["productAdditionRequestId"])
-            if job_context.get("productAdditionRequestId")
-            else "null"
-        )
-        has_more = "true" if job_context.get("hasMoreProducts") else "false"
-        product_id_gql = json.dumps(str(product_id))
-        class_id_gql = json.dumps(str(class_id))
+        job_context: dict | None = None,
+    ) -> dict:
+        """Build GraphQL variables for productAddition.submitV2."""
+        if not proposed_products:
+            raise FatalAPIError("submitV2 requires at least one proposedProductAddition")
 
-        return f"""
-mutation {{
-  productAddition {{
-    submitV2(request: {{
-      marketContext: {{
-        locale: {locale}
-        country: {country}
-        brand: {brand}
-      }}
-      jobContext: {{
-        productAdditionRequestId: {request_id}
-        hasMoreProducts: {has_more}
-      }}
-      proposedProductAdditions: [{{
-        productId: {product_id_gql}
-        classId: {class_id_gql}
-        attributes: [
-              {attrs_gql}
-        ]
-      }}]
-    }}) {{
-      batchId
-      status
-      productAdditionRequestId
-    }}
-  }}
-}}
-"""
+        job_context = job_context or {
+            "productAdditionRequestId": None,
+            "hasMoreProducts": False,
+        }
+        additions = []
+        for product in proposed_products:
+            additions.append(
+                {
+                    "productId": str(product["productId"]),
+                    "classId": str(product["classId"]),
+                    "attributes": [
+                        self._attribute_to_input(a) for a in product["attributes"]
+                    ],
+                }
+            )
+        request_id = job_context.get("productAdditionRequestId")
+        return {
+            "request": {
+                "marketContext": {
+                    "locale": market_context.get("locale", "en-US"),
+                    "country": market_context.get("country", "UNITED_STATES"),
+                    "brand": market_context.get("brand", "WAYFAIR"),
+                },
+                "jobContext": {
+                    "productAdditionRequestId": request_id,
+                    "hasMoreProducts": bool(job_context.get("hasMoreProducts")),
+                },
+                "proposedProductAdditions": additions,
+            }
+        }
 
     @staticmethod
     def resolve_submission_product_id(record: dict) -> str:
@@ -691,50 +683,90 @@ mutation {{
                     return str(value).strip()
         return str(record["productId"])
 
-    def upsert_record(self, record: dict, context: dict):
-        """Submit one product and wait for validation to complete."""
-        record_product_id = record["productId"]
-        wayfair_product_id = self.resolve_submission_product_id(record)
-        class_id = record["classId"]
-        attributes = record["attributes"]
+    def submit_records(
+        self,
+        records: list[dict],
+        *,
+        job_context: dict | None = None,
+    ) -> tuple[str, list[dict]]:
+        """Submit one or more preprocessed records in a single submitV2 and poll."""
+        if not records:
+            raise FatalAPIError("submit_records called with no records")
 
-        if wayfair_product_id != record_product_id:
-            LOGGER.info(
-                "Using core::supplierPartNumber %s as Wayfair productId "
-                "(record productId is %s)",
-                wayfair_product_id,
-                record_product_id,
+        market_context = self.resolve_market_context(records[0])
+
+        # Unlikelly to be the case, but if the records in a single submitV2 have different marketContexts,
+        # we raise an error to avoid unexpected behavior.
+        for record in records[1:]:
+            other_market = self.resolve_market_context(record)
+            if other_market != market_context:
+                raise FatalAPIError(
+                    "All records in one submitV2 must share the same marketContext "
+                    f"(productId {record.get('productId')} disagrees with "
+                    f"{records[0].get('productId')})"
+                )
+        proposed = []
+        for record in records:
+            wayfair_product_id = self.resolve_submission_product_id(record)
+            if wayfair_product_id != record["productId"]:
+                LOGGER.info(
+                    "Using core::supplierPartNumber %s as Wayfair productId "
+                    "(record productId is %s)",
+                    wayfair_product_id,
+                    record["productId"],
+                )
+            proposed.append(
+                {
+                    "productId": wayfair_product_id,
+                    "classId": record["classId"],
+                    "attributes": record["attributes"],
+                }
             )
 
-        market_context = self.resolve_market_context(record)
-        job_context = record.get("jobContext") or {
-            "productAdditionRequestId": None,
-            "hasMoreProducts": False,
-        }
-
-        mutation = self._build_submit_mutation(
-            wayfair_product_id, class_id, attributes, market_context, job_context
+        variables = self.build_submit_v2_variables(
+            proposed, market_context, job_context=job_context
         )
-        body = self._graphql(mutation)
+        body = self._graphql(SUBMIT_V2_MUTATION, variables)
         submit_result = (
             (body.get("data") or {}).get("productAddition") or {}
         ).get("submitV2") or {}
         request_id = submit_result.get("productAdditionRequestId")
         if not request_id:
             raise FatalAPIError(
-                f"Wayfair submitV2 returned no productAdditionRequestId for product "
-                f"{record_product_id} (Wayfair productId {wayfair_product_id}). "
+                f"Wayfair submitV2 returned no productAdditionRequestId. "
                 f"Response: {submit_result}"
             )
         LOGGER.info(
-            "Submitted product %s (Wayfair productId %s) → batchId=%s requestId=%s",
-            record_product_id,
-            wayfair_product_id,
+            "Submitted %d product(s) → batchId=%s requestId=%s",
+            len(records),
             submit_result.get("batchId"),
             request_id,
         )
+        statuses = self.poll_submission_statuses(request_id)
+        return request_id, statuses
 
-        status = self.poll_submission_status(request_id)
+    def upsert_record(self, record: dict, context: dict):
+        """Submit one product and wait for validation to complete."""
+        record_product_id = record["productId"]
+        wayfair_product_id = self.resolve_submission_product_id(record)
+        job_context = record.get("jobContext") or {
+            "productAdditionRequestId": None,
+            "hasMoreProducts": False,
+        }
+
+        request_id, statuses = self.submit_records(
+            [record], job_context=job_context
+        )
+        indexed = index_submission_rows_by_supplier_part(statuses)
+        status = indexed.get(wayfair_product_id)
+        if not status:
+            raise FatalAPIError(
+                f"No submissionsV2 status row for Wayfair productId {wayfair_product_id} "
+                f"(requestId {request_id})"
+            )
+        raise_for_failed_status_row(
+            status, format_flaw=self.format_validation_flaw
+        )
         LOGGER.info(
             "Product %s (Wayfair productId %s) validated: validationStatus=%s",
             record_product_id,

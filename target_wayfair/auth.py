@@ -3,7 +3,6 @@
 import base64
 import json
 import time
-from typing import Optional
 
 import requests
 from hotglue_etl_exceptions import InvalidCredentialsError
@@ -85,7 +84,7 @@ class WayfairAuth(OAuthAuthenticator):
 
         return (expires_at - _utc_now_ts()) >= TOKEN_REFRESH_BUFFER_SECONDS
 
-    def _access_token_expires_at(self) -> Optional[int]:
+    def _access_token_expires_at(self) -> int | None:
         """Resolve access token expiry as Unix seconds.
 
         Prefer JWT ``exp`` for portal tokens. Otherwise interpret ``expires_in`` as
