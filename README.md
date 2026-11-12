@@ -94,12 +94,19 @@ Records are passed through directly to the Wayfair API without a fixed field map
     {"attributeId": "price::wholesalePrice", "value": "199.99", "parentRank": 1, "rank": 1},
     {"attributeId": "shippingAndFulfillment::depth", "value": "12.0", "parentRank": 1, "rank": 1, "attributeInstance": 1}
   ],
-  "marketContext": {"locale": "en-US", "country": "UNITED_STATES", "brand": "WAYFAIR"},
-  "jobContext": {"productAdditionRequestId": null, "hasMoreProducts": false}
+  "marketContext": {"locale": "en-US", "country": "UNITED_STATES", "brand": "WAYFAIR"}
 }
 ```
 
-`marketContext` and `jobContext` are optional; they default to the config values (or `en-US / UNITED_STATES / WAYFAIR`) when omitted. Set `hasMoreProducts: true` and reuse `productAdditionRequestId` to send a large catalog in chunks.
+`marketContext` is optional; it defaults to the config values (or `en-US / UNITED_STATES / WAYFAIR`) when omitted.
+
+### Variant groups
+
+SKUs with `variantGrouping::variantType` of `Primary Variant` or `Non-Primary Variant` and the same `variantGrouping::groupReferenceId` are submitted together in one `productAddition.submitV2` call. The Singer stream must list each variant group **contiguously** (all members of group A, then group B, and so on). Standalone products (`Not Variant`, or no group reference) are submitted one record at a time.
+
+`submitV2` uses GraphQL **variables** for the request body (avoids inline query size limits on large batches).
+
+`jobContext` on records is optional for standalone products; the target does not use chunked `hasMoreProducts` for variant bundling.
 
 `productId` is the Singer/hotglue record key (e.g. your Plytix SKU). Wayfair's `submitV2` mutation also sends a top-level `productId`, which must match the catalog's supplier part number. When `core::supplierPartNumber` is present in `attributes`, the target uses that value as the Wayfair `productId`. Changing only the attribute while leaving the record `productId` as an older SKU will not bypass Wayfair duplicate-part-number validation.
 
@@ -107,7 +114,7 @@ Attribute `1` is Wayfair's class name (e.g. `"Beds"` for `classId` `"12"`). The 
 
 `productAddition.submitV2` creates **new** catalog items only. If a supplier part number already exists in your Wayfair catalog (including from earlier test exports), you must use the catalog update APIs instead of re-submitting it as a new product.
 
-After each submission the target polls `productAddition.submissionsV2` until `submissionStatus` leaves `PROCESSING`. If `validationStatus` is `FAILED`, an `InvalidPayloadError` is raised with the Wayfair flaw messages. Warnings are logged but do not block processing.
+After each submission the target polls `productAddition.submissionsV2` until every row in the batch is terminal. Poll results are matched to Singer records by `supplierPartNumber` (or `core::supplierPartNumber`). If a row's `validationStatus` is `FAILED`, that record's bookmark is marked failed with Wayfair flaw messages. Warnings are logged but do not block processing.
 
 ---
 
@@ -117,8 +124,12 @@ After each submission the target polls `productAddition.submissionsV2` until `su
 # Pipe a tap's output directly into the target
 tap-mydata --config tap_config.json | target-wayfair --config config.json
 
-# Run a local sample file
+# Run a local sample file (standalone product)
 cat sample_payload/valid_product.singer | target-wayfair --config .secrets/config.json
+
+# Two-SKU variant group (Primary + Non-Primary, same groupReferenceId, contiguous records).
+# Change productId / supplierPartNumber before sandbox if those SKUs already exist.
+cat sample_payload/variant_group_two_skus.singer | target-wayfair --config .secrets/config.json
 ```
 
 ---
