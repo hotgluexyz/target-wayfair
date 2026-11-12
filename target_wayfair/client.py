@@ -694,6 +694,17 @@ query GetTaxonomyAttributesByFilter {{
             raise FatalAPIError("submit_records called with no records")
 
         market_context = self.resolve_market_context(records[0])
+
+        # Unlikelly to be the case, but if the records in a single submitV2 have different marketContexts,
+        # we raise an error to avoid unexpected behavior.
+        for record in records[1:]:
+            other_market = self.resolve_market_context(record)
+            if other_market != market_context:
+                raise FatalAPIError(
+                    "All records in one submitV2 must share the same marketContext "
+                    f"(productId {record.get('productId')} disagrees with "
+                    f"{records[0].get('productId')})"
+                )
         proposed = []
         for record in records:
             wayfair_product_id = self.resolve_submission_product_id(record)

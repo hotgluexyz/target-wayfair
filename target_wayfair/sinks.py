@@ -280,6 +280,23 @@ class ProductsSink(WayfairSink):
             len(records),
         )
 
+        if len(records) < 2:
+            err = general_export_error(
+                f"Wayfair requires at least 2 variant SKUs in the same export."
+                f"Group {group_key} must include at least 2 SKUs, listed consecutively in the payload."
+            )
+            for item in batch:
+                self.update_state(
+                    self._product_error_state(
+                        err,
+                        record=item["record"],
+                        external_id=item.get("external_id"),
+                        record_hash=item.get("record_hash"),
+                    ),
+                    record=item["record"],
+                )
+            return
+
         try:
             request_id, statuses = self.submit_records(records)
         except Exception as e:
