@@ -434,6 +434,12 @@ query GetTaxonomyAttributesByFilter {{
         self, attribute_id: str, value, spec: dict
     ) -> Optional[str]:
         """Return a detailed error if `value` is not valid for this attribute spec."""
+        # HGI-11702: the taxonomy possibleAttributeValues for Brand/manufacturerId do not seem
+        # to match the actual Brands in supplierBrand.brandAssociations on prod, so we skip 
+        # preprocess enum checks. Wayfair submit still validates.
+        if str(attribute_id) == "core::manufacturerId":
+            return None
+
         value_str = str(value)
         value_format = spec.get("valueFormat") or {}
         datatype = value_format.get("datatype")
