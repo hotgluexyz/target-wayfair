@@ -2,12 +2,14 @@
 
 import json
 import os
-from typing import Any, Dict
+from typing import Any
 
 import pytest
+from hotglue_singer_sdk.exceptions import FatalAPIError
 from hotglue_singer_sdk.testing import get_standard_target_tests
 
 from target_wayfair.client import WayfairSink
+from target_wayfair.sinks import ProductsSink
 from target_wayfair.target import TargetWayfair
 
 SECRETS_PATH = os.path.join(os.path.dirname(__file__), "..", "..", ".secrets", "config.json")
@@ -93,7 +95,7 @@ def test_ensure_class_name_attribute_overrides_existing():
 
 
 @pytest.fixture
-def config() -> Dict[str, Any]:
+def config() -> dict[str, Any]:
     if not os.path.exists(SECRETS_PATH):
         pytest.skip("No .secrets/config.json found; skipping live tests")
     with open(SECRETS_PATH) as f:
@@ -108,3 +110,31 @@ def test_standard_target_tests(config):
     )
     for test in tests:
         test()
+
+
+def test_submit_records_rejects_mixed_market_context():
+    sink = object.__new__(ProductsSink)
+    records = [
+        {
+            "productId": "A",
+            "classId": "1",
+            "attributes": [],
+            "marketContext": {
+                "locale": "en-US",
+                "country": "UNITED_STATES",
+                "brand": "WAYFAIR",
+            },
+        },
+        {
+            "productId": "B",
+            "classId": "1",
+            "attributes": [],
+            "marketContext": {
+                "locale": "en-GB",
+                "country": "UNITED_KINGDOM",
+                "brand": "WAYFAIR",
+            },
+        },
+    ]
+    with pytest.raises(FatalAPIError, match="marketContext"):
+        sink.submit_records(records)
